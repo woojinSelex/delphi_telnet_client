@@ -47,7 +47,7 @@ type
     function DetectPrompt(const ACleanText: string): TKeeneticTelnetPromptKind;
     function PromptKindToText(const APromptKind: TKeeneticTelnetPromptKind): string;
   public
-    // Доработано ChatGPT 31.05.2026 01:58:40.000, сборка 1.0.0.3
+    // Доработано ChatGPT 31.05.2026 02:12:39.000, сборка 1.0.0.4
     constructor Create;
     destructor Destroy; override;
     procedure Connect(const AHost: string; const APort: Word; const ATimeoutMs: Cardinal = 15000);
@@ -69,6 +69,9 @@ const
   TELNET_DO   = Byte(253);
   TELNET_WONT = Byte(252);
   TELNET_WILL = Byte(251);
+
+var
+  Logger: TSafeLoggerCore;
 
 constructor TKeeneticTelnetClient.Create;
 begin
@@ -98,7 +101,7 @@ begin
   LResult := WSAStartup($0202, LWsaData);
   if LResult <> 0 then
   begin
-    TSafeLoggerCore.Instance.Write(llCritical, Format('Ошибка WSAStartup: %d', [LResult]), True);
+    Logger.Write(llCritical, Format('Ошибка WSAStartup: %d', [LResult]), True);
     raise Exception.CreateFmt('Ошибка WSAStartup: %d', [LResult]);
   end;
 end;
@@ -152,7 +155,7 @@ begin
   Disconnect;
   FHost := AHost;
   FPort := APort;
-  TSafeLoggerCore.Instance.Write(llInfo, Format('Подключение к Telnet %s:%d', [FHost, FPort]));
+  Logger.Write(llInfo, Format('Подключение к Telnet %s:%d', [FHost, FPort]));
 
   FSocket := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if FSocket = INVALID_SOCKET then
@@ -218,7 +221,7 @@ begin
   end;
 
   FConnected := True;
-  TSafeLoggerCore.Instance.Write(llInfo, Format('Telnet-соединение установлено: %s:%d', [FHost, FPort]));
+  Logger.Write(llInfo, Format('Telnet-соединение установлено: %s:%d', [FHost, FPort]));
 end;
 
 procedure TKeeneticTelnetClient.Disconnect;
@@ -231,7 +234,7 @@ begin
   end;
   if FConnected then
   begin
-    TSafeLoggerCore.Instance.Write(llInfo, 'Telnet-соединение закрыто.');
+    Logger.Write(llInfo, 'Telnet-соединение закрыто.');
   end;
   FConnected := False;
 end;
@@ -329,13 +332,13 @@ begin
   begin
     FLastHiddenLine := Trim(ALine);
     FLastSentLine := '';
-    TSafeLoggerCore.Instance.Write(llDebug, 'TELNET SEND: <hidden>');
+    Logger.Write(llDebug, 'TELNET SEND: <hidden>');
   end
   else
   begin
     FLastSentLine := Trim(ALine);
     FLastHiddenLine := '';
-    TSafeLoggerCore.Instance.Write(llDebug, 'TELNET SEND: ' + ALine);
+    Logger.Write(llDebug, 'TELNET SEND: ' + ALine);
   end;
 end;
 
@@ -553,7 +556,7 @@ begin
       LCleanChunk := RemoveTelnetEcho(LChunk);
       if LCleanChunk <> '' then
       begin
-        TSafeLoggerCore.Instance.Write(llDebug, 'TELNET RECV: ' + LCleanChunk);
+        Logger.Write(llDebug, 'TELNET RECV: ' + LCleanChunk);
       end;
       Result.CleanText := NormalizeTelnetText(Result.RawText);
       Result.PromptKind := DetectPrompt(Result.CleanText);
@@ -573,27 +576,33 @@ var
   LState: TKeeneticTelnetPromptState;
 begin
   EnsureConnected;
-  TSafeLoggerCore.Instance.Write(llInfo, 'Ожидание приглашения Telnet от роутера.');
+  Logger.Write(llInfo, 'Ожидание приглашения Telnet от роутера.');
   LState := WaitForPrompt(15000);
   if LState.PromptKind = tkpLogin then
   begin
-    TSafeLoggerCore.Instance.Write(llInfo, 'Отправка имени пользователя Telnet.');
+    Logger.Write(llInfo, 'Отправка имени пользователя Telnet.');
     SendLine(AUserName, True);
     LState := WaitForPrompt(15000);
   end;
   if LState.PromptKind = tkpSecret then
   begin
-    TSafeLoggerCore.Instance.Write(llInfo, 'Отправка ключа доступа Telnet.');
+    Logger.Write(llInfo, 'Отправка ключа доступа Telnet.');
     SendLine(AAccessKey, True);
     LState := WaitForPrompt(15000);
   end;
   if (LState.PromptKind <> tkpConfig) and (LState.PromptKind <> tkpExec) then
   begin
-    TSafeLoggerCore.Instance.Write(llCritical, 'Не удалось войти по Telnet. Ответ роутера: ' + LState.CleanText, True);
+    Logger.Write(llCritical, 'Не удалось войти по Telnet. Ответ роутера: ' + LState.CleanText, True);
     raise Exception.Create('Не удалось войти по Telnet. Ответ роутера: ' + LState.CleanText);
   end;
-  TSafeLoggerCore.Instance.Write(llInfo, 'Успешный вход по Telnet. Тип приглашения: ' + PromptKindToText(LState.PromptKind));
+  Logger.Write(llInfo, 'Успешный вход по Telnet. Тип приглашения: ' + PromptKindToText(LState.PromptKind));
   Result := LState.PromptKind;
 end;
+
+initialization
+  Logger := TSafeLoggerCore.Instance;
+
+finalization
+  Logger := nil;
 
 end.
