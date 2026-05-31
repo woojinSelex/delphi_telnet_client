@@ -70,6 +70,7 @@ object frmMain: TfrmMain
     Top = 7
     Width = 130
     Height = 23
+    PasswordChar = '*'
     TabOrder = 3
   end
   object btnConnect: TButton
