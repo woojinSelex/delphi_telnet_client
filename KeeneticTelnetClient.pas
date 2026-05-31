@@ -1,9 +1,9 @@
 unit KeeneticTelnetClient;
 
 {
-  Доработано ChatGPT 31.05.2026 11:59:30.000, сборка 1.0.0.8
-  Исправлено: логирование авторизации без повторов накопленного ответа.
-  Примечание: текст служебных сообщений оставлен ASCII, чтобы исключить порчу кодировки строк.
+  Доработано ChatGPT 31.05.2026 13:02:00.000, сборка 1.0.0.9
+  Назначение: чистый Telnet-клиент для Keenetic без CLI-команд.
+  Исправлено: русские сообщения, тихий режим лога, очистка echo login/password.
 }
 
 interface
@@ -33,11 +33,13 @@ type
     FLastSentLine: string;
     FLastHiddenLine: string;
     FQuietPeriodMs: Cardinal;
+    FVerboseLog: Boolean;
     class var FWinSockStarted: Boolean;
     class var FWinSockStartCount: Integer;
     class procedure InitializeWinSock; static;
     class procedure FinalizeWinSock; static;
     procedure EnsureConnected;
+    procedure WriteDebugLog(const AText: string);
     procedure SendRawBytes(const ABytes: TBytes);
     procedure SendTelnetNegotiationReply(const ACommand: Byte; const AOption: Byte);
     function ResolveHostIPv4(const AHost: string): u_long;
@@ -63,6 +65,7 @@ type
     property Host: string read FHost;
     property Port: Word read FPort;
     property QuietPeriodMs: Cardinal read FQuietPeriodMs write FQuietPeriodMs;
+    property VerboseLog: Boolean read FVerboseLog write FVerboseLog;
   end;
 
 implementation
@@ -90,6 +93,7 @@ begin
   FLastSentLine := '';
   FLastHiddenLine := '';
   FQuietPeriodMs := 350;
+  FVerboseLog := False;
   InitializeWinSock;
 end;
 
@@ -98,6 +102,14 @@ begin
   Disconnect;
   FinalizeWinSock;
   inherited Destroy;
+end;
+
+procedure TKeeneticTelnetClient.WriteDebugLog(const AText: string);
+begin
+  if FVerboseLog then
+  begin
+    Logger.Write(llDebug, AText);
+  end;
 end;
 
 class procedure TKeeneticTelnetClient.InitializeWinSock;
@@ -113,8 +125,8 @@ begin
   LResult := WSAStartup($0202, LWsaData);
   if LResult <> 0 then
   begin
-    Logger.Write(llCritical, Format('WSAStartup error: %d', [LResult]), True);
-    raise Exception.CreateFmt('WSAStartup error: %d', [LResult]);
+    Logger.Write(llCritical, Format('Ошибка WSAStartup: %d', [LResult]), True);
+    raise Exception.CreateFmt('Ошибка WSAStartup: %d', [LResult]);
   end;
   FWinSockStarted := True;
   FWinSockStartCount := 1;
@@ -139,11 +151,11 @@ procedure TKeeneticTelnetClient.EnsureConnected;
 begin
   if not FConnected then
   begin
-    raise Exception.Create('Telnet connection is not established.');
+    raise Exception.Create('Telnet-соединение не установлено.');
   end;
   if FSocket = INVALID_SOCKET then
   begin
-    raise Exception.Create('Telnet socket is invalid.');
+    raise Exception.Create('Telnet-сокет недействителен.');
   end;
 end;
 
@@ -156,7 +168,7 @@ begin
   LAddressText := Trim(AHost);
   if LAddressText = '' then
   begin
-    raise Exception.Create('IPv4 address or host name is empty.');
+    raise Exception.Create('Не указан IPv4-адрес или имя узла.');
   end;
   LAnsiHost := AnsiString(LAddressText);
   Result := inet_addr(PAnsiChar(LAnsiHost));
@@ -169,7 +181,7 @@ begin
     LHostEnt := gethostbyname(PAnsiChar(LAnsiHost));
     if LHostEnt = nil then
     begin
-      raise Exception.CreateFmt('Failed to resolve IPv4 host: %s', [AHost]);
+      raise Exception.CreateFmt('Не удалось определить IPv4-адрес узла: %s', [AHost]);
     end;
     Move(LHostEnt^.h_addr_list^^, Result, SizeOf(Result));
   end;
@@ -191,11 +203,11 @@ begin
   FPort := APort;
   FLastSentLine := '';
   FLastHiddenLine := '';
-  Logger.Write(llInfo, Format('Telnet connect to %s:%d', [FHost, FPort]));
+  Logger.Write(llInfo, Format('Подключение к Telnet %s:%d', [FHost, FPort]));
   FSocket := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if FSocket = INVALID_SOCKET then
   begin
-    raise Exception.CreateFmt('Failed to create TCP socket. WSAGetLastError=%d', [WSAGetLastError]);
+    raise Exception.CreateFmt('Не удалось создать TCP-сокет. WSAGetLastError=%d', [WSAGetLastError]);
   end;
   FillChar(LAddr, SizeOf(LAddr), 0);
   LAddr.sin_family := AF_INET;
@@ -205,7 +217,7 @@ begin
   if ioctlsocket(FSocket, FIONBIO, LMode) <> 0 then
   begin
     Disconnect;
-    raise Exception.CreateFmt('Failed to enable non-blocking socket mode. WSAGetLastError=%d', [WSAGetLastError]);
+    raise Exception.CreateFmt('Не удалось включить неблокирующий режим сокета. WSAGetLastError=%d', [WSAGetLastError]);
   end;
   if Winapi.WinSock.connect(FSocket, LAddr, SizeOf(LAddr)) = SOCKET_ERROR then
   begin
@@ -213,7 +225,7 @@ begin
     if LErrorCode <> WSAEWOULDBLOCK then
     begin
       Disconnect;
-      raise Exception.CreateFmt('Connection error to %s:%d. WSAGetLastError=%d', [FHost, FPort, LErrorCode]);
+      raise Exception.CreateFmt('Ошибка подключения к %s:%d. WSAGetLastError=%d', [FHost, FPort, LErrorCode]);
     end;
   end;
   FD_ZERO(LWriteSet);
@@ -226,28 +238,28 @@ begin
   if LSelectResult <= 0 then
   begin
     Disconnect;
-    raise Exception.CreateFmt('Failed to connect to %s:%d in %d ms.', [FHost, FPort, ATimeoutMs]);
+    raise Exception.CreateFmt('Не удалось подключиться к %s:%d за %d мс.', [FHost, FPort, ATimeoutMs]);
   end;
   LErrorCode := 0;
   LErrorSize := SizeOf(LErrorCode);
   if getsockopt(FSocket, SOL_SOCKET, SO_ERROR, PAnsiChar(@LErrorCode), LErrorSize) <> 0 then
   begin
     Disconnect;
-    raise Exception.CreateFmt('Failed to get connection state. WSAGetLastError=%d', [WSAGetLastError]);
+    raise Exception.CreateFmt('Не удалось получить состояние подключения. WSAGetLastError=%d', [WSAGetLastError]);
   end;
   if LErrorCode <> 0 then
   begin
     Disconnect;
-    raise Exception.CreateFmt('Connection error to %s:%d. SO_ERROR=%d', [FHost, FPort, LErrorCode]);
+    raise Exception.CreateFmt('Ошибка подключения к %s:%d. SO_ERROR=%d', [FHost, FPort, LErrorCode]);
   end;
   LMode := 0;
   if ioctlsocket(FSocket, FIONBIO, LMode) <> 0 then
   begin
     Disconnect;
-    raise Exception.CreateFmt('Failed to restore blocking socket mode. WSAGetLastError=%d', [WSAGetLastError]);
+    raise Exception.CreateFmt('Не удалось вернуть блокирующий режим сокета. WSAGetLastError=%d', [WSAGetLastError]);
   end;
   FConnected := True;
-  Logger.Write(llInfo, Format('Telnet connection established: %s:%d', [FHost, FPort]));
+  Logger.Write(llInfo, Format('Telnet-соединение установлено: %s:%d', [FHost, FPort]));
 end;
 
 procedure TKeeneticTelnetClient.Disconnect;
@@ -260,7 +272,7 @@ begin
   end;
   if FConnected then
   begin
-    Logger.Write(llInfo, 'Telnet connection closed.');
+    Logger.Write(llInfo, 'Telnet-соединение закрыто.');
   end;
   FConnected := False;
 end;
@@ -295,12 +307,12 @@ begin
     LReadCount := recv(FSocket, LBuffer, SizeOf(LBuffer), 0);
     if LReadCount = SOCKET_ERROR then
     begin
-      raise Exception.CreateFmt('Telnet socket read error. WSAGetLastError=%d', [WSAGetLastError]);
+      raise Exception.CreateFmt('Ошибка чтения Telnet-сокета. WSAGetLastError=%d', [WSAGetLastError]);
     end;
     if LReadCount = 0 then
     begin
       Disconnect;
-      raise Exception.Create('Telnet connection closed by remote side.');
+      raise Exception.Create('Telnet-соединение закрыто удалённой стороной.');
     end;
     LTotalLength := Length(Result);
     SetLength(Result, LTotalLength + LReadCount);
@@ -320,7 +332,7 @@ begin
     LSent := send(FSocket, ABytes[LTotalSent], Length(ABytes) - LTotalSent, 0);
     if LSent = SOCKET_ERROR then
     begin
-      raise Exception.CreateFmt('Telnet data send error. WSAGetLastError=%d', [WSAGetLastError]);
+      raise Exception.CreateFmt('Ошибка отправки Telnet-данных. WSAGetLastError=%d', [WSAGetLastError]);
     end;
     Inc(LTotalSent, LSent);
   end;
@@ -430,13 +442,13 @@ begin
   begin
     FLastHiddenLine := Trim(ALine);
     FLastSentLine := '';
-    Logger.Write(llDebug, 'TELNET SEND: <hidden>');
+    WriteDebugLog('TELNET SEND: <скрыто>');
   end
   else
   begin
     FLastSentLine := Trim(ALine);
     FLastHiddenLine := '';
-    Logger.Write(llDebug, 'TELNET SEND: ' + ALine);
+    WriteDebugLog('TELNET SEND: ' + ALine);
   end;
 end;
 
@@ -539,6 +551,30 @@ begin
     for LLine in LLines do
     begin
       LTrimmed := LLine.Trim;
+      if LTrimmed = '' then
+      begin
+        Continue;
+      end;
+      if TRegEx.IsMatch(LTrimmed, '(?i)^login\s*:\s*$') then
+      begin
+        Continue;
+      end;
+      if TRegEx.IsMatch(LTrimmed, '(?i)^login\s*:.*$') then
+      begin
+        Continue;
+      end;
+      if TRegEx.IsMatch(LTrimmed, '(?i)^password\s*:\s*$') then
+      begin
+        Continue;
+      end;
+      if TRegEx.IsMatch(LTrimmed, '(?i)^password\s*:.*$') then
+      begin
+        Continue;
+      end;
+      if TRegEx.IsMatch(LTrimmed, '^\*+$') then
+      begin
+        Continue;
+      end;
       if (FLastSentLine <> '') and (LTrimmed = FLastSentLine) then
       begin
         Continue;
@@ -547,14 +583,11 @@ begin
       begin
         Continue;
       end;
-      if LTrimmed <> '' then
+      if LBuilder.Length > 0 then
       begin
-        if LBuilder.Length > 0 then
-        begin
-          LBuilder.AppendLine;
-        end;
-        LBuilder.Append(LLine);
+        LBuilder.AppendLine;
       end;
+      LBuilder.Append(LLine);
     end;
     Result := LBuilder.ToString.Trim;
   finally
@@ -564,12 +597,12 @@ end;
 
 function TKeeneticTelnetClient.ContainsLoginRequest(const AText: string): Boolean;
 begin
-  Result := TRegEx.IsMatch(AText, '(?im)(^|\s|\n)(login|username|user name)\s*:\s*$');
+  Result := TRegEx.IsMatch(AText, '(?im)(^|\s|\n)login\s*:\s*$');
 end;
 
 function TKeeneticTelnetClient.ContainsPasswordRequest(const AText: string): Boolean;
 begin
-  Result := TRegEx.IsMatch(AText, '(?im)(^|\s|\n)(password|pass phrase|access key)\s*:\s*$');
+  Result := TRegEx.IsMatch(AText, '(?im)(^|\s|\n)password\s*:\s*$');
 end;
 
 function TKeeneticTelnetClient.ContainsAuthorizedPrompt(const AText: string): Boolean;
@@ -589,7 +622,7 @@ end;
 
 function TKeeneticTelnetClient.ContainsDeniedText(const AText: string): Boolean;
 begin
-  Result := TRegEx.IsMatch(AText, '(?im)(authentication failed|authorization failed|login incorrect|access denied|invalid password|wrong password)');
+  Result := TRegEx.IsMatch(AText, '(?im)(authentication failed|authorization failed|login incorrect|access denied|invalid password|wrong password|неверный пароль|доступ запрещен|доступ запрещён)');
 end;
 
 function TKeeneticTelnetClient.ReadResponse(const ATimeoutMs: Cardinal): string;
@@ -601,7 +634,7 @@ begin
   Result := RemoveEchoFromText(LRawText);
   if Result <> '' then
   begin
-    Logger.Write(llDebug, 'TELNET RECV: ' + Result);
+    WriteDebugLog('TELNET RECV: ' + Result);
   end;
 end;
 
@@ -621,7 +654,7 @@ begin
   LDeadline := GetTickCount64 + ATimeoutMs;
   LUserSent := False;
   LPasswordSent := False;
-  Logger.Write(llInfo, 'Waiting for Telnet authorization.');
+  Logger.Write(llInfo, 'Ожидание Telnet-авторизации.');
   while GetTickCount64 < LDeadline do
   begin
     LChunk := WaitForText(1200);
@@ -632,33 +665,39 @@ begin
       LCleanAll := NormalizeText(Result.RawText);
       if LCleanChunk <> '' then
       begin
-        Logger.Write(llDebug, 'TELNET AUTH RECV: ' + LCleanChunk);
+        WriteDebugLog('TELNET AUTH RECV: ' + LCleanChunk);
       end;
       if ContainsDeniedText(LCleanAll) then
       begin
         Result.CleanText := RemoveEchoFromText(Result.RawText);
-        Logger.Write(llCritical, 'Telnet authorization denied. Response: ' + Result.CleanText, True);
-        raise Exception.Create('Telnet authorization denied. Response: ' + Result.CleanText);
+        Logger.Write(llCritical, 'Telnet-авторизация отклонена.', True);
+        raise Exception.Create('Telnet-авторизация отклонена.');
       end;
       if ContainsLoginRequest(LCleanAll) and not LUserSent then
       begin
-        Logger.Write(llInfo, 'Sending Telnet user name.');
+        Logger.Write(llInfo, 'Отправка имени пользователя Telnet.');
         SendLine(AUserName, True);
         LUserSent := True;
         Continue;
       end;
       if ContainsPasswordRequest(LCleanAll) and not LPasswordSent then
       begin
-        Logger.Write(llInfo, 'Sending Telnet password.');
+        Logger.Write(llInfo, 'Отправка пароля Telnet.');
         SendLine(APassword, True);
         LPasswordSent := True;
         Continue;
+      end;
+      if LUserSent and LPasswordSent and ContainsLoginRequest(LCleanAll) then
+      begin
+        Result.CleanText := RemoveEchoFromText(Result.RawText);
+        Logger.Write(llCritical, 'Telnet-авторизация не выполнена: устройство снова запросило логин.', True);
+        raise Exception.Create('Telnet-авторизация не выполнена: устройство снова запросило логин.');
       end;
       if ContainsAuthorizedPrompt(LCleanAll) then
       begin
         Result.IsAuthorized := True;
         Result.CleanText := RemoveEchoFromText(Result.RawText);
-        Logger.Write(llInfo, 'Telnet authorization completed.');
+        Logger.Write(llInfo, 'Telnet-авторизация выполнена успешно.');
         Exit;
       end;
     end
@@ -668,11 +707,8 @@ begin
     end;
   end;
   Result.CleanText := RemoveEchoFromText(Result.RawText);
-  if not Result.IsAuthorized then
-  begin
-    Logger.Write(llCritical, 'Telnet authorization timeout. Response: ' + Result.CleanText, True);
-    raise Exception.Create('Telnet authorization timeout. Response: ' + Result.CleanText);
-  end;
+  Logger.Write(llCritical, 'Не удалось выполнить Telnet-авторизацию за заданный тайм-аут.', True);
+  raise Exception.Create('Не удалось выполнить Telnet-авторизацию за заданный тайм-аут.');
 end;
 
 initialization
