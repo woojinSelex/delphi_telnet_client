@@ -1,9 +1,9 @@
 unit RoutesConfig;
 
 {
-  Доработано ChatGPT 31.05.2026 13:12:00.000, сборка 1.0.0.3
+  Доработано ChatGPT 31.05.2026 13:22:00.000, сборка 1.0.0.4
   Назначение: чтение и создание ini-файла программы.
-  Пароль хранится в единственном поле Password в виде MASK:BASE64.
+  Пароль хранится в единственном поле Password как короткая Base64-строка с XOR-маскировкой.
 }
 
 interface
@@ -32,7 +32,7 @@ type
     function IniValueToBool(const AValue: string; const ADefault: Boolean): Boolean;
     function MaskText(const AText: string): string;
     function UnmaskText(const APasswordValue: string): string;
-    function IsMaskedPassword(const APasswordValue: string): Boolean;
+    function LooksLikeBase64Password(const APasswordValue: string): Boolean;
   public
     constructor Create(const AFileName: string);
     procedure EnsureExists;
@@ -44,7 +44,6 @@ type
 implementation
 
 const
-  MASK_PREFIX = 'MASK:';
   MASK_KEY: array[0..7] of Byte = ($4B, $65, $65, $6E, $65, $74, $69, $63);
 
 constructor TRoutesConfig.Create(const AFileName: string);
@@ -83,9 +82,29 @@ begin
   Result := ADefault;
 end;
 
-function TRoutesConfig.IsMaskedPassword(const APasswordValue: string): Boolean;
+function TRoutesConfig.LooksLikeBase64Password(const APasswordValue: string): Boolean;
+var
+  LValue: string;
+  LIndex: Integer;
 begin
-  Result := SameText(Copy(Trim(APasswordValue), 1, Length(MASK_PREFIX)), MASK_PREFIX);
+  LValue := Trim(APasswordValue);
+  Result := False;
+  if LValue = '' then
+  begin
+    Exit;
+  end;
+  if (Length(LValue) mod 4) <> 0 then
+  begin
+    Exit;
+  end;
+  for LIndex := 1 to Length(LValue) do
+  begin
+    if not CharInSet(LValue[LIndex], ['A'..'Z', 'a'..'z', '0'..'9', '+', '/', '=']) then
+    begin
+      Exit;
+    end;
+  end;
+  Result := True;
 end;
 
 function TRoutesConfig.MaskText(const AText: string): string;
@@ -103,7 +122,7 @@ begin
   begin
     LBytes[LIndex] := LBytes[LIndex] xor MASK_KEY[LIndex mod Length(MASK_KEY)];
   end;
-  Result := MASK_PREFIX + TNetEncoding.Base64.EncodeBytesToString(LBytes);
+  Result := TNetEncoding.Base64.EncodeBytesToString(LBytes);
 end;
 
 function TRoutesConfig.UnmaskText(const APasswordValue: string): string;
@@ -118,23 +137,30 @@ begin
   begin
     Exit;
   end;
-  if not IsMaskedPassword(LValue) then
+  if SameText(Copy(LValue, 1, 6), 'DPAPI:') then
   begin
-    if SameText(Copy(LValue, 1, 6), 'DPAPI:') then
-    begin
-      Result := '';
-      Exit;
-    end;
+    Result := '';
+    Exit;
+  end;
+  if SameText(Copy(LValue, 1, 5), 'MASK:') then
+  begin
+    Delete(LValue, 1, 5);
+  end;
+  if not LooksLikeBase64Password(LValue) then
+  begin
     Result := LValue;
     Exit;
   end;
-  Delete(LValue, 1, Length(MASK_PREFIX));
-  LBytes := TNetEncoding.Base64.DecodeStringToBytes(LValue);
-  for LIndex := 0 to Length(LBytes) - 1 do
-  begin
-    LBytes[LIndex] := LBytes[LIndex] xor MASK_KEY[LIndex mod Length(MASK_KEY)];
+  try
+    LBytes := TNetEncoding.Base64.DecodeStringToBytes(LValue);
+    for LIndex := 0 to Length(LBytes) - 1 do
+    begin
+      LBytes[LIndex] := LBytes[LIndex] xor MASK_KEY[LIndex mod Length(MASK_KEY)];
+    end;
+    Result := TEncoding.UTF8.GetString(LBytes);
+  except
+    Result := LValue;
   end;
-  Result := TEncoding.UTF8.GetString(LBytes);
 end;
 
 procedure TRoutesConfig.EnsureExists;
@@ -183,7 +209,7 @@ begin
     Result.VerboseTelnetLog := IniValueToBool(LIni.ReadString('Settings', 'VerboseTelnetLog', '0'), False);
     LPasswordValue := LIni.ReadString('Host', 'Password', '');
     Result.Password := UnmaskText(LPasswordValue);
-    if Result.SaveCredentials and (Result.Password <> '') and not IsMaskedPassword(LPasswordValue) then
+    if Result.SaveCredentials and (Result.Password <> '') and (LPasswordValue <> MaskText(Result.Password)) then
     begin
       LIni.WriteString('Host', 'Password', MaskText(Result.Password));
     end;
