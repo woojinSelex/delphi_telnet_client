@@ -1,8 +1,8 @@
-﻿unit MainForm;
+unit MainForm;
 
 {
-  Написано ChatGPT 31.05.2026 10:03:00.000, сборка 1.0.0.1
-  Минимальная форма проверки KeeneticTelnetClient.pas в RAD Studio 12.2.
+  Доработано ChatGPT 31.05.2026 10:31:00.000, сборка 1.0.0.2
+  Исправлено: форма использует TKeeneticTelnetLoginResult вместо отсутствующего TKeeneticTelnetPromptKind.
 }
 
 interface
@@ -99,14 +99,25 @@ end;
 procedure TfrmMain.btnConnectClick(Sender: TObject);
 var
   LPort: Integer;
-  LPrompt: TKeeneticTelnetPromptKind;
+  LLoginResult: TKeeneticTelnetLoginResult;
 begin
   LPort := StrToIntDef(Trim(edtPort.Text), 23);
   try
     FLogger.Write(llInfo, 'Начало проверки Telnet-подключения.');
     FClient.Connect(Trim(edtHost.Text), Word(LPort), 15000);
-    LPrompt := FClient.Login(Trim(edtLogin.Text), edtPassword.Text);
-    FLogger.Write(llInfo, Format('Авторизация выполнена. Prompt=%d', [Ord(LPrompt)]));
+    LLoginResult := FClient.Login(Trim(edtLogin.Text), edtPassword.Text);
+    if LLoginResult.IsAuthorized then
+    begin
+      FLogger.Write(llInfo, 'Авторизация выполнена успешно.');
+    end
+    else
+    begin
+      FLogger.Write(llWarning, 'Метод Login завершился без признака успешной авторизации.');
+    end;
+    if LLoginResult.CleanText <> '' then
+    begin
+      FLogger.Write(llDebug, 'Очищенный ответ авторизации: ' + LLoginResult.CleanText);
+    end;
     SetControlsState(True);
   except
     on E: Exception do
