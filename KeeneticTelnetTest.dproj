@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ProjectGuid>{8D7F4F9B-6B4D-4B0E-9D22-91D1F8F0B2C1}</ProjectGuid>
+    <ProjectVersion>20.0</ProjectVersion>
+    <FrameworkType>VCL</FrameworkType>
+    <MainSource>KeeneticTelnetTest.dpr</MainSource>
+    <Base>True</Base>
+    <Config Condition="'$(Config)'==''">Debug</Config>
+    <TargetedPlatforms>3</TargetedPlatforms>
+    <AppType>Application</AppType>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Base)'!=''">
+    <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Winapi;Vcl;$(DCC_Namespace)</DCC_Namespace>
+    <DCC_ImageBase>00400000</DCC_ImageBase>
+    <DCC_UsePackage>vcl;rtl;dbrtl;vcldb;xmlrtl;vclimg;bindcomp;bindengine;bindcompvcl;$(DCC_UsePackage)</DCC_UsePackage>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Debug'">
+    <Version>7.0</Version>
+    <CfgParent>Base</CfgParent>
+    <Base>true</Base>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Release'">
+    <Version>7.0</Version>
+    <CfgParent>Base</CfgParent>
+    <Base>true</Base>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Base_Win64)'!=''">
+    <DCC_UsePackage>vcl;rtl;$(DCC_UsePackage)</DCC_UsePackage>
+    <VerInfo_Locale>1049</VerInfo_Locale>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Cfg_1_Win64)'!=''">
+    <DCC_Define>DEBUG;$(DCC_Define)</DCC_Define>
+    <DCC_DebugInformation>true</DCC_DebugInformation>
+    <DCC_LocalDebugSymbols>true</DCC_LocalDebugSymbols>
+    <DCC_SymbolReferenceInfo>2</DCC_SymbolReferenceInfo>
+    <DCC_Optimize>false</DCC_Optimize>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Cfg_2_Win64)'!=''">
+    <DCC_DebugInformation>false</DCC_DebugInformation>
+    <DCC_LocalDebugSymbols>false</DCC_LocalDebugSymbols>
+    <DCC_SymbolReferenceInfo>0</DCC_SymbolReferenceInfo>
+    <DCC_Optimize>true</DCC_Optimize>
+  </PropertyGroup>
+  <ItemGroup>
+    <DelphiCompile Include="KeeneticTelnetTest.dpr">
+      <MainSource>MainSource</MainSource>
+    </DelphiCompile>
+    <DCCReference Include="MainForm.pas">
+      <Form>frmMain</Form>
+    </DCCReference>
+    <DCCReference Include="KeeneticTelnetClient.pas" />
+    <DCCReference Include="SafeLogger.pas" />
+  </ItemGroup>
+  <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')" />
+</Project>

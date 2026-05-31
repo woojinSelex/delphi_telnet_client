@@ -1,7 +1,7 @@
 program KeeneticTelnetTest;
 
 {
-  Написано ChatGPT 31.05.2026 09:55:00.000, сборка 1.0.0.1
+  Доработано ChatGPT 31.05.2026 10:08:00.000, сборка 1.0.0.2
   Минимальный VCL-проект для проверки KeeneticTelnetClient.pas в RAD Studio 12.2.
 }
 
@@ -10,8 +10,6 @@ uses
   MainForm in 'MainForm.pas' {frmMain},
   KeeneticTelnetClient in 'KeeneticTelnetClient.pas',
   SafeLogger in 'SafeLogger.pas';
-
-{$R *.res}
 
 begin
   Application.Initialize;
