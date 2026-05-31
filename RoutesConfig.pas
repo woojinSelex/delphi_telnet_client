@@ -1,16 +1,14 @@
 unit RoutesConfig;
 
 {
-  Доработано ChatGPT 31.05.2026 12:38:00.000, сборка 1.0.0.2
-  Назначение: чтение и создание routes.ini для тестового Telnet-проекта.
-  Пароль хранится в единственном поле Password в виде DPAPI:BASE64.
+  Доработано ChatGPT 31.05.2026 13:12:00.000, сборка 1.0.0.3
+  Назначение: чтение и создание ini-файла программы.
+  Пароль хранится в единственном поле Password в виде MASK:BASE64.
 }
 
 interface
 
 uses
-  Winapi.Windows,
-  Winapi.ActiveX,
   System.SysUtils,
   System.Classes,
   System.IniFiles,
@@ -32,9 +30,9 @@ type
     FFileName: string;
     function BoolToIniValue(const AValue: Boolean): string;
     function IniValueToBool(const AValue: string; const ADefault: Boolean): Boolean;
-    function ProtectText(const AText: string): string;
-    function UnprotectText(const APasswordValue: string): string;
-    function IsProtectedPassword(const APasswordValue: string): Boolean;
+    function MaskText(const AText: string): string;
+    function UnmaskText(const APasswordValue: string): string;
+    function IsMaskedPassword(const APasswordValue: string): Boolean;
   public
     constructor Create(const AFileName: string);
     procedure EnsureExists;
@@ -46,32 +44,8 @@ type
 implementation
 
 const
-  PROTECTED_PREFIX = 'DPAPI:';
-
-type
-  PDataBlob = ^TDataBlob;
-  TDataBlob = record
-    cbData: DWORD;
-    pbData: PByte;
-  end;
-
-function CryptProtectData(
-  pDataIn: PDataBlob;
-  szDataDescr: PWideChar;
-  pOptionalEntropy: PDataBlob;
-  pvReserved: Pointer;
-  pPromptStruct: Pointer;
-  dwFlags: DWORD;
-  pDataOut: PDataBlob): BOOL; stdcall; external 'Crypt32.dll';
-
-function CryptUnprotectData(
-  pDataIn: PDataBlob;
-  ppszDataDescr: PPWideChar;
-  pOptionalEntropy: PDataBlob;
-  pvReserved: Pointer;
-  pPromptStruct: Pointer;
-  dwFlags: DWORD;
-  pDataOut: PDataBlob): BOOL; stdcall; external 'Crypt32.dll';
+  MASK_PREFIX = 'MASK:';
+  MASK_KEY: array[0..7] of Byte = ($4B, $65, $65, $6E, $65, $74, $69, $63);
 
 constructor TRoutesConfig.Create(const AFileName: string);
 begin
@@ -109,95 +83,58 @@ begin
   Result := ADefault;
 end;
 
-function TRoutesConfig.IsProtectedPassword(const APasswordValue: string): Boolean;
+function TRoutesConfig.IsMaskedPassword(const APasswordValue: string): Boolean;
 begin
-  Result := SameText(Copy(Trim(APasswordValue), 1, Length(PROTECTED_PREFIX)), PROTECTED_PREFIX);
+  Result := SameText(Copy(Trim(APasswordValue), 1, Length(MASK_PREFIX)), MASK_PREFIX);
 end;
 
-function TRoutesConfig.ProtectText(const AText: string): string;
+function TRoutesConfig.MaskText(const AText: string): string;
 var
   LBytes: TBytes;
-  LInput: TDataBlob;
-  LOutput: TDataBlob;
-  LProtectedBytes: TBytes;
+  LIndex: Integer;
 begin
   Result := '';
   if AText = '' then
   begin
     Exit;
   end;
-
   LBytes := TEncoding.UTF8.GetBytes(AText);
-  FillChar(LInput, SizeOf(LInput), 0);
-  FillChar(LOutput, SizeOf(LOutput), 0);
-  LInput.cbData := Length(LBytes);
-  LInput.pbData := @LBytes[0];
-
-  if not CryptProtectData(@LInput, nil, nil, nil, nil, 0, @LOutput) then
+  for LIndex := 0 to Length(LBytes) - 1 do
   begin
-    RaiseLastOSError;
+    LBytes[LIndex] := LBytes[LIndex] xor MASK_KEY[LIndex mod Length(MASK_KEY)];
   end;
-
-  try
-    SetLength(LProtectedBytes, LOutput.cbData);
-    Move(LOutput.pbData^, LProtectedBytes[0], LOutput.cbData);
-    Result := PROTECTED_PREFIX + TNetEncoding.Base64.EncodeBytesToString(LProtectedBytes);
-  finally
-    if LOutput.pbData <> nil then
-    begin
-      CoTaskMemFree(LOutput.pbData);
-    end;
-  end;
+  Result := MASK_PREFIX + TNetEncoding.Base64.EncodeBytesToString(LBytes);
 end;
 
-function TRoutesConfig.UnprotectText(const APasswordValue: string): string;
+function TRoutesConfig.UnmaskText(const APasswordValue: string): string;
 var
-  LProtectedValue: string;
-  LProtectedBytes: TBytes;
-  LInput: TDataBlob;
-  LOutput: TDataBlob;
-  LTextBytes: TBytes;
+  LValue: string;
+  LBytes: TBytes;
+  LIndex: Integer;
 begin
   Result := '';
-  LProtectedValue := Trim(APasswordValue);
-  if LProtectedValue = '' then
+  LValue := Trim(APasswordValue);
+  if LValue = '' then
   begin
     Exit;
   end;
-
-  if not IsProtectedPassword(LProtectedValue) then
+  if not IsMaskedPassword(LValue) then
   begin
-    Result := LProtectedValue;
-    Exit;
-  end;
-
-  Delete(LProtectedValue, 1, Length(PROTECTED_PREFIX));
-  LProtectedBytes := TNetEncoding.Base64.DecodeStringToBytes(LProtectedValue);
-  if Length(LProtectedBytes) = 0 then
-  begin
-    Exit;
-  end;
-
-  FillChar(LInput, SizeOf(LInput), 0);
-  FillChar(LOutput, SizeOf(LOutput), 0);
-  LInput.cbData := Length(LProtectedBytes);
-  LInput.pbData := @LProtectedBytes[0];
-
-  if not CryptUnprotectData(@LInput, nil, nil, nil, nil, 0, @LOutput) then
-  begin
-    Exit;
-  end;
-
-  try
-    SetLength(LTextBytes, LOutput.cbData);
-    Move(LOutput.pbData^, LTextBytes[0], LOutput.cbData);
-    Result := TEncoding.UTF8.GetString(LTextBytes);
-  finally
-    if LOutput.pbData <> nil then
+    if SameText(Copy(LValue, 1, 6), 'DPAPI:') then
     begin
-      CoTaskMemFree(LOutput.pbData);
+      Result := '';
+      Exit;
     end;
+    Result := LValue;
+    Exit;
   end;
+  Delete(LValue, 1, Length(MASK_PREFIX));
+  LBytes := TNetEncoding.Base64.DecodeStringToBytes(LValue);
+  for LIndex := 0 to Length(LBytes) - 1 do
+  begin
+    LBytes[LIndex] := LBytes[LIndex] xor MASK_KEY[LIndex mod Length(MASK_KEY)];
+  end;
+  Result := TEncoding.UTF8.GetString(LBytes);
 end;
 
 procedure TRoutesConfig.EnsureExists;
@@ -208,7 +145,6 @@ begin
   begin
     Exit;
   end;
-
   ForceDirectories(ExtractFilePath(FFileName));
   LIni := TIniFile.Create(FFileName);
   try
@@ -245,13 +181,11 @@ begin
     Result.SaveCredentials := IniValueToBool(LIni.ReadString('Settings', 'SaveCredentials', '1'), True);
     Result.SaveLog := IniValueToBool(LIni.ReadString('Settings', 'SaveLog', '1'), True);
     Result.VerboseTelnetLog := IniValueToBool(LIni.ReadString('Settings', 'VerboseTelnetLog', '0'), False);
-
     LPasswordValue := LIni.ReadString('Host', 'Password', '');
-    Result.Password := UnprotectText(LPasswordValue);
-
-    if Result.SaveCredentials and (Result.Password <> '') and not IsProtectedPassword(LPasswordValue) then
+    Result.Password := UnmaskText(LPasswordValue);
+    if Result.SaveCredentials and (Result.Password <> '') and not IsMaskedPassword(LPasswordValue) then
     begin
-      LIni.WriteString('Host', 'Password', ProtectText(Result.Password));
+      LIni.WriteString('Host', 'Password', MaskText(Result.Password));
     end;
   finally
     LIni.Free;
@@ -271,10 +205,9 @@ begin
     LIni.WriteString('Settings', 'SaveCredentials', BoolToIniValue(ASettings.SaveCredentials));
     LIni.WriteString('Settings', 'SaveLog', BoolToIniValue(ASettings.SaveLog));
     LIni.WriteString('Settings', 'VerboseTelnetLog', BoolToIniValue(ASettings.VerboseTelnetLog));
-
     if ASettings.SaveCredentials then
     begin
-      LIni.WriteString('Host', 'Password', ProtectText(ASettings.Password));
+      LIni.WriteString('Host', 'Password', MaskText(ASettings.Password));
     end
     else
     begin
