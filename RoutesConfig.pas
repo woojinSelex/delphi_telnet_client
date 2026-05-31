@@ -1,9 +1,9 @@
 unit RoutesConfig;
 
 {
-  Написано ChatGPT 31.05.2026 12:31:00.000, сборка 1.0.0.1
+  Доработано ChatGPT 31.05.2026 12:38:00.000, сборка 1.0.0.2
   Назначение: чтение и создание routes.ini для тестового Telnet-проекта.
-  Пароль хранится в зашифрованном виде через Windows DPAPI CurrentUser.
+  Пароль хранится в единственном поле Password в виде DPAPI:BASE64.
 }
 
 interface
@@ -33,7 +33,8 @@ type
     function BoolToIniValue(const AValue: Boolean): string;
     function IniValueToBool(const AValue: string; const ADefault: Boolean): Boolean;
     function ProtectText(const AText: string): string;
-    function UnprotectText(const AProtectedText: string): string;
+    function UnprotectText(const APasswordValue: string): string;
+    function IsProtectedPassword(const APasswordValue: string): Boolean;
   public
     constructor Create(const AFileName: string);
     procedure EnsureExists;
@@ -43,6 +44,9 @@ type
   end;
 
 implementation
+
+const
+  PROTECTED_PREFIX = 'DPAPI:';
 
 type
   PDataBlob = ^TDataBlob;
@@ -105,6 +109,11 @@ begin
   Result := ADefault;
 end;
 
+function TRoutesConfig.IsProtectedPassword(const APasswordValue: string): Boolean;
+begin
+  Result := SameText(Copy(Trim(APasswordValue), 1, Length(PROTECTED_PREFIX)), PROTECTED_PREFIX);
+end;
+
 function TRoutesConfig.ProtectText(const AText: string): string;
 var
   LBytes: TBytes;
@@ -132,7 +141,7 @@ begin
   try
     SetLength(LProtectedBytes, LOutput.cbData);
     Move(LOutput.pbData^, LProtectedBytes[0], LOutput.cbData);
-    Result := TNetEncoding.Base64.EncodeBytesToString(LProtectedBytes);
+    Result := PROTECTED_PREFIX + TNetEncoding.Base64.EncodeBytesToString(LProtectedBytes);
   finally
     if LOutput.pbData <> nil then
     begin
@@ -141,20 +150,29 @@ begin
   end;
 end;
 
-function TRoutesConfig.UnprotectText(const AProtectedText: string): string;
+function TRoutesConfig.UnprotectText(const APasswordValue: string): string;
 var
+  LProtectedValue: string;
   LProtectedBytes: TBytes;
   LInput: TDataBlob;
   LOutput: TDataBlob;
   LTextBytes: TBytes;
 begin
   Result := '';
-  if Trim(AProtectedText) = '' then
+  LProtectedValue := Trim(APasswordValue);
+  if LProtectedValue = '' then
   begin
     Exit;
   end;
 
-  LProtectedBytes := TNetEncoding.Base64.DecodeStringToBytes(AProtectedText);
+  if not IsProtectedPassword(LProtectedValue) then
+  begin
+    Result := LProtectedValue;
+    Exit;
+  end;
+
+  Delete(LProtectedValue, 1, Length(PROTECTED_PREFIX));
+  LProtectedBytes := TNetEncoding.Base64.DecodeStringToBytes(LProtectedValue);
   if Length(LProtectedBytes) = 0 then
   begin
     Exit;
@@ -198,7 +216,6 @@ begin
     LIni.WriteInteger('Host', 'Port', 23);
     LIni.WriteString('Host', 'Username', 'admin');
     LIni.WriteString('Host', 'Password', '');
-    LIni.WriteString('Host', 'PasswordProtected', '');
     LIni.WriteInteger('Settings', 'SaveCredentials', 1);
     LIni.WriteInteger('Settings', 'SaveLog', 1);
     LIni.WriteInteger('Settings', 'VerboseTelnetLog', 0);
@@ -211,8 +228,7 @@ end;
 function TRoutesConfig.Load: TRoutesConnectionSettings;
 var
   LIni: TIniFile;
-  LPlainPassword: string;
-  LProtectedPassword: string;
+  LPasswordValue: string;
   LPort: Integer;
 begin
   EnsureExists;
@@ -230,18 +246,12 @@ begin
     Result.SaveLog := IniValueToBool(LIni.ReadString('Settings', 'SaveLog', '1'), True);
     Result.VerboseTelnetLog := IniValueToBool(LIni.ReadString('Settings', 'VerboseTelnetLog', '0'), False);
 
-    LProtectedPassword := LIni.ReadString('Host', 'PasswordProtected', '');
-    Result.Password := UnprotectText(LProtectedPassword);
+    LPasswordValue := LIni.ReadString('Host', 'Password', '');
+    Result.Password := UnprotectText(LPasswordValue);
 
-    LPlainPassword := LIni.ReadString('Host', 'Password', '');
-    if (Result.Password = '') and (LPlainPassword <> '') then
+    if Result.SaveCredentials and (Result.Password <> '') and not IsProtectedPassword(LPasswordValue) then
     begin
-      Result.Password := LPlainPassword;
-      if Result.SaveCredentials then
-      begin
-        LIni.WriteString('Host', 'PasswordProtected', ProtectText(LPlainPassword));
-        LIni.WriteString('Host', 'Password', '');
-      end;
+      LIni.WriteString('Host', 'Password', ProtectText(Result.Password));
     end;
   finally
     LIni.Free;
@@ -264,12 +274,10 @@ begin
 
     if ASettings.SaveCredentials then
     begin
-      LIni.WriteString('Host', 'PasswordProtected', ProtectText(ASettings.Password));
-      LIni.WriteString('Host', 'Password', '');
+      LIni.WriteString('Host', 'Password', ProtectText(ASettings.Password));
     end
     else
     begin
-      LIni.WriteString('Host', 'PasswordProtected', '');
       LIni.WriteString('Host', 'Password', '');
     end;
   finally
