@@ -1,4 +1,4 @@
-program KeeneticTelnetTest;
+﻿program KeeneticTelnetTest;
 
 {
   Доработано ChatGPT 31.05.2026 10:08:00.000, сборка 1.0.0.2

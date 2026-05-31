@@ -1,34 +1,43 @@
 object frmMain: TfrmMain
+  Left = 0
+  Top = 0
   Caption = 'Keenetic Telnet Test'
   ClientHeight = 600
   ClientWidth = 900
+  Color = clBtnFace
+  Font.Charset = DEFAULT_CHARSET
+  Font.Color = clWindowText
+  Font.Height = -12
+  Font.Name = 'Segoe UI'
+  Font.Style = []
   OnCreate = FormCreate
   OnDestroy = FormDestroy
+  TextHeight = 15
   object lblHost: TLabel
     Left = 8
     Top = 10
-    Width = 13
+    Width = 10
     Height = 15
     Caption = 'IP'
   end
   object lblPort: TLabel
     Left = 190
     Top = 10
-    Width = 29
+    Width = 22
     Height = 15
     Caption = 'Port'
   end
   object lblLogin: TLabel
     Left = 279
     Top = 10
-    Width = 31
+    Width = 30
     Height = 15
     Caption = 'Login'
   end
   object lblPassword: TLabel
     Left = 430
     Top = 10
-    Width = 50
+    Width = 19
     Height = 15
     Caption = 'Key'
   end
@@ -45,7 +54,7 @@ object frmMain: TfrmMain
     Top = 7
     Width = 45
     Height = 23
-    Tab = 1
+    TabOrder = 1
     Text = '23'
   end
   object edtLogin: TEdit

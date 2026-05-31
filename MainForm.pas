@@ -1,4 +1,4 @@
-unit MainForm;
+﻿unit MainForm;
 
 {
   Написано ChatGPT 31.05.2026 10:03:00.000, сборка 1.0.0.1
