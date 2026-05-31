@@ -1,5 +1,12 @@
 unit KeeneticTelnetClient;
 
+{
+  Доработано ChatGPT 31.05.2026 09:37:00.000, сборка 1.0.0.5
+  Назначение: чистый Telnet-клиент для Keenetic без CLI-команд.
+  Возможности: TCP/Telnet-подключение, login/password, обработка IAC,
+  очистка ESC/echo/backspace и получение полного ответа до тишины или тайм-аута.
+}
+
 interface
 
 uses
@@ -11,18 +18,10 @@ uses
   SafeLogger;
 
 type
-  TKeeneticTelnetPromptKind = (
-    tkpUnknown,
-    tkpLogin,
-    tkpSecret,
-    tkpExec,
-    tkpConfig
-  );
-
-  TKeeneticTelnetPromptState = record
+  TKeeneticTelnetLoginResult = record
     RawText: string;
     CleanText: string;
-    PromptKind: TKeeneticTelnetPromptKind;
+    IsAuthorized: Boolean;
   end;
 
   TKeeneticTelnetClient = class
@@ -34,31 +33,37 @@ type
     FEncoding: TEncoding;
     FLastSentLine: string;
     FLastHiddenLine: string;
-    procedure InitializeWinSock;
-    procedure FinalizeWinSock;
+    FQuietPeriodMs: Cardinal;
+    class var FWinSockStarted: Boolean;
+    class var FWinSockStartCount: Integer;
+    class procedure InitializeWinSock; static;
+    class procedure FinalizeWinSock; static;
     procedure EnsureConnected;
-    procedure SendTelnetNegotiationReply(const ACommand: Byte; const AOption: Byte);
     procedure SendRawBytes(const ABytes: TBytes);
-    function ReceiveAvailableBytes(const ATimeoutMs: Cardinal): TBytes;
-    function IsSocketReadable(const ATimeoutMs: Cardinal): Boolean;
+    procedure SendTelnetNegotiationReply(const ACommand: Byte; const AOption: Byte);
     function ResolveHostIPv4(const AHost: string): u_long;
-    function NormalizeTelnetText(const AText: string): string;
-    function RemoveTelnetEcho(const AText: string): string;
-    function DetectPrompt(const ACleanText: string): TKeeneticTelnetPromptKind;
-    function PromptKindToText(const APromptKind: TKeeneticTelnetPromptKind): string;
+    function IsSocketReadable(const ATimeoutMs: Cardinal): Boolean;
+    function ReceiveAvailableBytes(const ATimeoutMs: Cardinal): TBytes;
+    function FilterTelnetBytes(const ARawBytes: TBytes): TBytes;
+    function NormalizeText(const AText: string): string;
+    function RemoveEchoFromText(const AText: string): string;
+    function ContainsLoginRequest(const AText: string): Boolean;
+    function ContainsPasswordRequest(const AText: string): Boolean;
+    function ContainsAuthorizedPrompt(const AText: string): Boolean;
+    function ContainsDeniedText(const AText: string): Boolean;
+    function WaitForText(const ATimeoutMs: Cardinal): string;
   public
-    // Доработано ChatGPT 31.05.2026 02:12:39.000, сборка 1.0.0.4
     constructor Create;
     destructor Destroy; override;
-    procedure Connect(const AHost: string; const APort: Word; const ATimeoutMs: Cardinal = 15000);
+    procedure Connect(const AHost: string; const APort: Word = 23; const ATimeoutMs: Cardinal = 15000);
     procedure Disconnect;
     procedure SendLine(const ALine: string; const AHideInLog: Boolean = False);
-    function ReadTelnetText(const ATimeoutMs: Cardinal = 5000): string;
-    function WaitForPrompt(const ATimeoutMs: Cardinal = 180000): TKeeneticTelnetPromptState;
-    function Login(const AUserName: string; const AAccessKey: string): TKeeneticTelnetPromptKind;
+    function ReadResponse(const ATimeoutMs: Cardinal = 15000): string;
+    function Login(const AUserName: string; const APassword: string; const ATimeoutMs: Cardinal = 30000): TKeeneticTelnetLoginResult;
     property Connected: Boolean read FConnected;
     property Host: string read FHost;
     property Port: Word read FPort;
+    property QuietPeriodMs: Cardinal read FQuietPeriodMs write FQuietPeriodMs;
   end;
 
 implementation
@@ -69,6 +74,8 @@ const
   TELNET_DO   = Byte(253);
   TELNET_WONT = Byte(252);
   TELNET_WILL = Byte(251);
+  TELNET_SB   = Byte(250);
+  TELNET_SE   = Byte(240);
 
 var
   Logger: TSafeLoggerCore;
@@ -83,6 +90,7 @@ begin
   FEncoding := TEncoding.UTF8;
   FLastSentLine := '';
   FLastHiddenLine := '';
+  FQuietPeriodMs := 350;
   InitializeWinSock;
 end;
 
@@ -93,22 +101,42 @@ begin
   inherited Destroy;
 end;
 
-procedure TKeeneticTelnetClient.InitializeWinSock;
+class procedure TKeeneticTelnetClient.InitializeWinSock;
 var
   LWsaData: WSAData;
   LResult: Integer;
 begin
+  if FWinSockStarted then
+  begin
+    Inc(FWinSockStartCount);
+    Exit;
+  end;
+
   LResult := WSAStartup($0202, LWsaData);
   if LResult <> 0 then
   begin
     Logger.Write(llCritical, Format('Ошибка WSAStartup: %d', [LResult]), True);
     raise Exception.CreateFmt('Ошибка WSAStartup: %d', [LResult]);
   end;
+
+  FWinSockStarted := True;
+  FWinSockStartCount := 1;
 end;
 
-procedure TKeeneticTelnetClient.FinalizeWinSock;
+class procedure TKeeneticTelnetClient.FinalizeWinSock;
 begin
-  WSACleanup;
+  if not FWinSockStarted then
+  begin
+    Exit;
+  end;
+
+  Dec(FWinSockStartCount);
+  if FWinSockStartCount <= 0 then
+  begin
+    WSACleanup;
+    FWinSockStarted := False;
+    FWinSockStartCount := 0;
+  end;
 end;
 
 procedure TKeeneticTelnetClient.EnsureConnected;
@@ -117,6 +145,7 @@ begin
   begin
     raise Exception.Create('Telnet-соединение не установлено.');
   end;
+
   if FSocket = INVALID_SOCKET then
   begin
     raise Exception.Create('Telnet-сокет недействителен.');
@@ -130,6 +159,7 @@ var
 begin
   LAnsiHost := AnsiString(AHost);
   Result := inet_addr(PAnsiChar(LAnsiHost));
+
   if Result = INADDR_NONE then
   begin
     LHostEnt := gethostbyname(PAnsiChar(LAnsiHost));
@@ -155,6 +185,9 @@ begin
   Disconnect;
   FHost := AHost;
   FPort := APort;
+  FLastSentLine := '';
+  FLastHiddenLine := '';
+
   Logger.Write(llInfo, Format('Подключение к Telnet %s:%d', [FHost, FPort]));
 
   FSocket := socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -193,6 +226,7 @@ begin
   LTimeout.tv_sec := ATimeoutMs div 1000;
   LTimeout.tv_usec := (ATimeoutMs mod 1000) * 1000;
   LSelectResult := select(0, nil, @LWriteSet, @LExceptSet, @LTimeout);
+
   if LSelectResult <= 0 then
   begin
     Disconnect;
@@ -232,10 +266,12 @@ begin
     closesocket(FSocket);
     FSocket := INVALID_SOCKET;
   end;
+
   if FConnected then
   begin
     Logger.Write(llInfo, 'Telnet-соединение закрыто.');
   end;
+
   FConnected := False;
 end;
 
@@ -246,40 +282,48 @@ var
   LSelectResult: Integer;
 begin
   EnsureConnected;
+
   FD_ZERO(LReadSet);
   FD_SET(FSocket, LReadSet);
+
   LTimeout.tv_sec := ATimeoutMs div 1000;
   LTimeout.tv_usec := (ATimeoutMs mod 1000) * 1000;
+
   LSelectResult := select(0, @LReadSet, nil, nil, @LTimeout);
   Result := LSelectResult > 0;
 end;
 
 function TKeeneticTelnetClient.ReceiveAvailableBytes(const ATimeoutMs: Cardinal): TBytes;
 var
-  LBuffer: array[0..4095] of Byte;
+  LBuffer: array[0..8191] of Byte;
   LReadCount: Integer;
   LTotalLength: Integer;
 begin
   SetLength(Result, 0);
+
   if not IsSocketReadable(ATimeoutMs) then
   begin
     Exit;
   end;
+
   repeat
     LReadCount := recv(FSocket, LBuffer, SizeOf(LBuffer), 0);
+
     if LReadCount = SOCKET_ERROR then
     begin
       raise Exception.CreateFmt('Ошибка чтения Telnet-сокета. WSAGetLastError=%d', [WSAGetLastError]);
     end;
+
     if LReadCount = 0 then
     begin
       Disconnect;
       raise Exception.Create('Telnet-соединение закрыто удалённой стороной.');
     end;
+
     LTotalLength := Length(Result);
     SetLength(Result, LTotalLength + LReadCount);
     Move(LBuffer[0], Result[LTotalLength], LReadCount);
-  until not IsSocketReadable(30);
+  until not IsSocketReadable(25);
 end;
 
 procedure TKeeneticTelnetClient.SendRawBytes(const ABytes: TBytes);
@@ -289,6 +333,7 @@ var
 begin
   EnsureConnected;
   LTotalSent := 0;
+
   while LTotalSent < Length(ABytes) do
   begin
     LSent := send(FSocket, ABytes[LTotalSent], Length(ABytes) - LTotalSent, 0);
@@ -306,19 +351,104 @@ var
   LBuffer: TBytes;
 begin
   LReplyCommand := TELNET_WONT;
+
   if (ACommand = TELNET_WILL) or (ACommand = TELNET_WONT) then
   begin
     LReplyCommand := TELNET_DONT;
   end;
+
   if (ACommand = TELNET_DO) or (ACommand = TELNET_DONT) then
   begin
     LReplyCommand := TELNET_WONT;
   end;
+
   SetLength(LBuffer, 3);
   LBuffer[0] := TELNET_IAC;
   LBuffer[1] := LReplyCommand;
   LBuffer[2] := AOption;
   SendRawBytes(LBuffer);
+end;
+
+function TKeeneticTelnetClient.FilterTelnetBytes(const ARawBytes: TBytes): TBytes;
+var
+  LIndex: Integer;
+  LOutputIndex: Integer;
+  LCommand: Byte;
+  LOption: Byte;
+  LInSubNegotiation: Boolean;
+begin
+  SetLength(Result, Length(ARawBytes));
+  LIndex := 0;
+  LOutputIndex := 0;
+  LInSubNegotiation := False;
+
+  while LIndex < Length(ARawBytes) do
+  begin
+    if LInSubNegotiation then
+    begin
+      if ARawBytes[LIndex] = TELNET_IAC then
+      begin
+        if (LIndex + 1) < Length(ARawBytes) then
+        begin
+          if ARawBytes[LIndex + 1] = TELNET_SE then
+          begin
+            Inc(LIndex, 2);
+            LInSubNegotiation := False;
+            Continue;
+          end;
+        end;
+      end;
+      Inc(LIndex);
+      Continue;
+    end;
+
+    if ARawBytes[LIndex] = TELNET_IAC then
+    begin
+      if (LIndex + 1) >= Length(ARawBytes) then
+      begin
+        Break;
+      end;
+
+      LCommand := ARawBytes[LIndex + 1];
+
+      if LCommand = TELNET_IAC then
+      begin
+        Result[LOutputIndex] := TELNET_IAC;
+        Inc(LOutputIndex);
+        Inc(LIndex, 2);
+        Continue;
+      end;
+
+      if LCommand = TELNET_SB then
+      begin
+        LInSubNegotiation := True;
+        Inc(LIndex, 2);
+        Continue;
+      end;
+
+      if (LCommand = TELNET_WILL) or (LCommand = TELNET_WONT) or
+         (LCommand = TELNET_DO) or (LCommand = TELNET_DONT) then
+      begin
+        if (LIndex + 2) < Length(ARawBytes) then
+        begin
+          LOption := ARawBytes[LIndex + 2];
+          SendTelnetNegotiationReply(LCommand, LOption);
+          Inc(LIndex, 3);
+          Continue;
+        end;
+        Break;
+      end;
+
+      Inc(LIndex, 2);
+      Continue;
+    end;
+
+    Result[LOutputIndex] := ARawBytes[LIndex];
+    Inc(LOutputIndex);
+    Inc(LIndex);
+  end;
+
+  SetLength(Result, LOutputIndex);
 end;
 
 procedure TKeeneticTelnetClient.SendLine(const ALine: string; const AHideInLog: Boolean);
@@ -328,6 +458,7 @@ begin
   EnsureConnected;
   LBytes := FEncoding.GetBytes(ALine + #13#10);
   SendRawBytes(LBytes);
+
   if AHideInLog then
   begin
     FLastHiddenLine := Trim(ALine);
@@ -342,57 +473,29 @@ begin
   end;
 end;
 
-function TKeeneticTelnetClient.ReadTelnetText(const ATimeoutMs: Cardinal): string;
+function TKeeneticTelnetClient.WaitForText(const ATimeoutMs: Cardinal): string;
 var
   LDeadline: UInt64;
   LLastDataAt: UInt64;
   LReceivedAny: Boolean;
   LRawBytes: TBytes;
   LTextBytes: TBytes;
-  LIndex: Integer;
-  LOutputIndex: Integer;
-  LCommand: Byte;
-  LOption: Byte;
 begin
   Result := '';
   LDeadline := GetTickCount64 + ATimeoutMs;
   LLastDataAt := GetTickCount64;
   LReceivedAny := False;
+
   while GetTickCount64 < LDeadline do
   begin
     LRawBytes := ReceiveAvailableBytes(80);
+
     if Length(LRawBytes) > 0 then
     begin
       LReceivedAny := True;
       LLastDataAt := GetTickCount64;
-      SetLength(LTextBytes, Length(LRawBytes));
-      LOutputIndex := 0;
-      LIndex := 0;
-      while LIndex < Length(LRawBytes) do
-      begin
-        if LRawBytes[LIndex] = TELNET_IAC then
-        begin
-          if (LIndex + 2) < Length(LRawBytes) then
-          begin
-            LCommand := LRawBytes[LIndex + 1];
-            LOption := LRawBytes[LIndex + 2];
-            if LCommand <> TELNET_IAC then
-            begin
-              SendTelnetNegotiationReply(LCommand, LOption);
-              Inc(LIndex, 3);
-              Continue;
-            end;
-            LTextBytes[LOutputIndex] := TELNET_IAC;
-            Inc(LOutputIndex);
-            Inc(LIndex, 2);
-            Continue;
-          end;
-        end;
-        LTextBytes[LOutputIndex] := LRawBytes[LIndex];
-        Inc(LOutputIndex);
-        Inc(LIndex);
-      end;
-      SetLength(LTextBytes, LOutputIndex);
+      LTextBytes := FilterTelnetBytes(LRawBytes);
+
       if Length(LTextBytes) > 0 then
       begin
         Result := Result + FEncoding.GetString(LTextBytes);
@@ -400,7 +503,7 @@ begin
     end
     else
     begin
-      if LReceivedAny and ((GetTickCount64 - LLastDataAt) >= 300) then
+      if LReceivedAny and ((GetTickCount64 - LLastDataAt) >= FQuietPeriodMs) then
       begin
         Break;
       end;
@@ -409,7 +512,7 @@ begin
   end;
 end;
 
-function TKeeneticTelnetClient.NormalizeTelnetText(const AText: string): string;
+function TKeeneticTelnetClient.NormalizeText(const AText: string): string;
 var
   LValue: string;
   LLines: TArray<string>;
@@ -421,15 +524,19 @@ begin
     Result := '';
     Exit;
   end;
+
   LValue := AText.Replace(#0, '');
   LValue := TRegEx.Replace(LValue, '\x1B\[[0-9;?]*[ -/]*[@-~]', '');
+  LValue := TRegEx.Replace(LValue, '\x1B\][^\x07]*(\x07|\x1B\\)', '');
   LValue := TRegEx.Replace(LValue, '\x1B[@-Z\\-_]', '');
   LValue := LValue.Replace(#13, '');
+
   while TRegEx.IsMatch(LValue, '.\x08') do
   begin
     LValue := TRegEx.Replace(LValue, '.\x08', '');
   end;
-  LLines := LValue.Split([#10]);
+
+  LLines := LValue.Split([#10], TStringSplitOptions.None);
   LBuilder := TStringBuilder.Create;
   try
     for LLine in LLines do
@@ -450,7 +557,7 @@ begin
   end;
 end;
 
-function TKeeneticTelnetClient.RemoveTelnetEcho(const AText: string): string;
+function TKeeneticTelnetClient.RemoveEchoFromText(const AText: string): string;
 var
   LClean: string;
   LLines: TArray<string>;
@@ -458,26 +565,30 @@ var
   LTrimmed: string;
   LBuilder: TStringBuilder;
 begin
-  LClean := NormalizeTelnetText(AText);
+  LClean := NormalizeText(AText);
   if LClean = '' then
   begin
     Result := '';
     Exit;
   end;
+
   LLines := LClean.Split([sLineBreak], TStringSplitOptions.None);
   LBuilder := TStringBuilder.Create;
   try
     for LLine in LLines do
     begin
       LTrimmed := LLine.Trim;
-      if (FLastSentLine <> '') and (LTrimmed = FLastSentLine) then
+
+      if (FLastSentLine <> '') and (SameText(LTrimmed, FLastSentLine)) then
       begin
         Continue;
       end;
+
       if (FLastHiddenLine <> '') and (LTrimmed = FLastHiddenLine) then
       begin
         Continue;
       end;
+
       if LTrimmed <> '' then
       begin
         if LBuilder.Length > 0 then
@@ -487,120 +598,142 @@ begin
         LBuilder.Append(LLine);
       end;
     end;
+
     Result := LBuilder.ToString.Trim;
   finally
     LBuilder.Free;
   end;
 end;
 
-function TKeeneticTelnetClient.DetectPrompt(const ACleanText: string): TKeeneticTelnetPromptKind;
+function TKeeneticTelnetClient.ContainsLoginRequest(const AText: string): Boolean;
+begin
+  Result := TRegEx.IsMatch(AText, '(?im)(^|\s|\n)(login|username|user name)\s*:\s*$');
+end;
+
+function TKeeneticTelnetClient.ContainsPasswordRequest(const AText: string): Boolean;
+begin
+  Result := TRegEx.IsMatch(AText, '(?im)(^|\s|\n)(password|pass phrase|access key)\s*:\s*$');
+end;
+
+function TKeeneticTelnetClient.ContainsAuthorizedPrompt(const AText: string): Boolean;
+begin
+  Result := False;
+
+  if TRegEx.IsMatch(AText, '(?m)^\s*>\s*$') then
+  begin
+    Result := True;
+    Exit;
+  end;
+
+  if TRegEx.IsMatch(AText, '(?m)^\s*\([^)]+\)>\s*$') then
+  begin
+    Result := True;
+    Exit;
+  end;
+end;
+
+function TKeeneticTelnetClient.ContainsDeniedText(const AText: string): Boolean;
+begin
+  Result := TRegEx.IsMatch(AText, '(?im)(authentication failed|authorization failed|login incorrect|access denied|invalid password|wrong password|ошибка аутентификации|доступ запрещён|доступ запрещен|неверный пароль)');
+end;
+
+function TKeeneticTelnetClient.ReadResponse(const ATimeoutMs: Cardinal): string;
 var
-  LSecretPromptPattern: string;
+  LRawText: string;
 begin
-  Result := tkpUnknown;
-  if TRegEx.IsMatch(ACleanText, '(?m)^\((config(?:-[^)]+)?)\)>\s*$') then
+  EnsureConnected;
+  LRawText := WaitForText(ATimeoutMs);
+  Result := RemoveEchoFromText(LRawText);
+
+  if Result <> '' then
   begin
-    Result := tkpConfig;
-    Exit;
-  end;
-  if TRegEx.IsMatch(ACleanText, '(?m)^>\s*$') then
-  begin
-    Result := tkpExec;
-    Exit;
-  end;
-  if TRegEx.IsMatch(ACleanText, '(?im)login:\s*$') then
-  begin
-    Result := tkpLogin;
-    Exit;
-  end;
-  LSecretPromptPattern := '(?im)' + 'pass' + 'word' + ':\s*$';
-  if TRegEx.IsMatch(ACleanText, LSecretPromptPattern) then
-  begin
-    Result := tkpSecret;
-    Exit;
+    Logger.Write(llDebug, 'TELNET RECV: ' + Result);
   end;
 end;
 
-function TKeeneticTelnetClient.PromptKindToText(const APromptKind: TKeeneticTelnetPromptKind): string;
-begin
-  case APromptKind of
-    tkpLogin:
-      Result := 'login';
-    tkpSecret:
-      Result := 'secret';
-    tkpExec:
-      Result := 'exec';
-    tkpConfig:
-      Result := 'config';
-  else
-    Result := 'unknown';
-  end;
-end;
-
-function TKeeneticTelnetClient.WaitForPrompt(const ATimeoutMs: Cardinal): TKeeneticTelnetPromptState;
+function TKeeneticTelnetClient.Login(const AUserName: string; const APassword: string; const ATimeoutMs: Cardinal): TKeeneticTelnetLoginResult;
 var
   LDeadline: UInt64;
   LChunk: string;
-  LCleanChunk: string;
+  LCleanAll: string;
+  LUserSent: Boolean;
+  LPasswordSent: Boolean;
 begin
+  EnsureConnected;
+
   Result.RawText := '';
   Result.CleanText := '';
-  Result.PromptKind := tkpUnknown;
+  Result.IsAuthorized := False;
+
   LDeadline := GetTickCount64 + ATimeoutMs;
+  LUserSent := False;
+  LPasswordSent := False;
+
+  Logger.Write(llInfo, 'Ожидание Telnet-авторизации Keenetic.');
+
   while GetTickCount64 < LDeadline do
   begin
-    LChunk := ReadTelnetText(700);
+    LChunk := WaitForText(1200);
+
     if LChunk <> '' then
     begin
       Result.RawText := Result.RawText + LChunk;
-      LCleanChunk := RemoveTelnetEcho(LChunk);
-      if LCleanChunk <> '' then
+      LCleanAll := NormalizeText(Result.RawText);
+      Result.CleanText := RemoveEchoFromText(Result.RawText);
+
+      if Result.CleanText <> '' then
       begin
-        Logger.Write(llDebug, 'TELNET RECV: ' + LCleanChunk);
+        Logger.Write(llDebug, 'TELNET AUTH RECV: ' + Result.CleanText);
       end;
-      Result.CleanText := NormalizeTelnetText(Result.RawText);
-      Result.PromptKind := DetectPrompt(Result.CleanText);
-      if Result.PromptKind <> tkpUnknown then
+
+      if ContainsDeniedText(LCleanAll) then
       begin
+        Logger.Write(llCritical, 'Telnet-авторизация отклонена. Ответ: ' + Result.CleanText, True);
+        raise Exception.Create('Telnet-авторизация отклонена. Ответ: ' + Result.CleanText);
+      end;
+
+      if ContainsLoginRequest(LCleanAll) and not LUserSent then
+      begin
+        Logger.Write(llInfo, 'Отправка имени пользователя Telnet.');
+        SendLine(AUserName, True);
+        LUserSent := True;
+        Continue;
+      end;
+
+      if ContainsPasswordRequest(LCleanAll) and not LPasswordSent then
+      begin
+        Logger.Write(llInfo, 'Отправка пароля Telnet.');
+        SendLine(APassword, True);
+        LPasswordSent := True;
+        Continue;
+      end;
+
+      if ContainsAuthorizedPrompt(LCleanAll) then
+      begin
+        Result.IsAuthorized := True;
+        Logger.Write(llInfo, 'Telnet-авторизация Keenetic выполнена успешно.');
         Exit;
       end;
+    end
+    else
+    begin
+      Sleep(50);
     end;
-    Sleep(50);
   end;
-  Result.CleanText := NormalizeTelnetText(Result.RawText);
-  Result.PromptKind := DetectPrompt(Result.CleanText);
-end;
 
-function TKeeneticTelnetClient.Login(const AUserName: string; const AAccessKey: string): TKeeneticTelnetPromptKind;
-var
-  LState: TKeeneticTelnetPromptState;
-begin
-  EnsureConnected;
-  Logger.Write(llInfo, 'Ожидание приглашения Telnet от роутера.');
-  LState := WaitForPrompt(15000);
-  if LState.PromptKind = tkpLogin then
+  Result.CleanText := RemoveEchoFromText(Result.RawText);
+
+  if not Result.IsAuthorized then
   begin
-    Logger.Write(llInfo, 'Отправка имени пользователя Telnet.');
-    SendLine(AUserName, True);
-    LState := WaitForPrompt(15000);
+    Logger.Write(llCritical, 'Не удалось выполнить Telnet-авторизацию за заданный тайм-аут. Ответ: ' + Result.CleanText, True);
+    raise Exception.Create('Не удалось выполнить Telnet-авторизацию за заданный тайм-аут. Ответ: ' + Result.CleanText);
   end;
-  if LState.PromptKind = tkpSecret then
-  begin
-    Logger.Write(llInfo, 'Отправка ключа доступа Telnet.');
-    SendLine(AAccessKey, True);
-    LState := WaitForPrompt(15000);
-  end;
-  if (LState.PromptKind <> tkpConfig) and (LState.PromptKind <> tkpExec) then
-  begin
-    Logger.Write(llCritical, 'Не удалось войти по Telnet. Ответ роутера: ' + LState.CleanText, True);
-    raise Exception.Create('Не удалось войти по Telnet. Ответ роутера: ' + LState.CleanText);
-  end;
-  Logger.Write(llInfo, 'Успешный вход по Telnet. Тип приглашения: ' + PromptKindToText(LState.PromptKind));
-  Result := LState.PromptKind;
 end;
 
 initialization
   Logger := TSafeLoggerCore.Instance;
+  TKeeneticTelnetClient.FWinSockStarted := False;
+  TKeeneticTelnetClient.FWinSockStartCount := 0;
 
 finalization
   Logger := nil;
