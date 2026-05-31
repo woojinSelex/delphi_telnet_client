@@ -1,8 +1,8 @@
 unit MainForm;
 
 {
-  Доработано ChatGPT 31.05.2026 10:31:00.000, сборка 1.0.0.2
-  Исправлено: форма использует TKeeneticTelnetLoginResult вместо отсутствующего TKeeneticTelnetPromptKind.
+  Доработано ChatGPT 31.05.2026 12:49:00.000, сборка 1.0.0.3
+  Добавлено: загрузка и сохранение настроек подключения в ini-файл по имени программы.
 }
 
 interface
@@ -18,7 +18,8 @@ uses
   Vcl.Dialogs,
   Vcl.StdCtrls,
   SafeLogger,
-  KeeneticTelnetClient;
+  KeeneticTelnetClient,
+  RoutesConfig;
 
 type
   TfrmMain = class(TForm)
@@ -40,8 +41,13 @@ type
   private
     FClient: TKeeneticTelnetClient;
     FLogger: TSafeLoggerCore;
+    FConfig: TRoutesConfig;
+    FSettings: TRoutesConnectionSettings;
     procedure ConfigureLogger;
     procedure SetControlsState(const AConnected: Boolean);
+    function GetIniFileName: string;
+    procedure LoadSettingsToControls;
+    procedure SaveSettingsFromControls;
   public
   end;
 
@@ -51,6 +57,11 @@ var
 implementation
 
 {$R *.dfm}
+
+function TfrmMain.GetIniFileName: string;
+begin
+  Result := ChangeFileExt(Application.ExeName, '.ini');
+end;
 
 procedure TfrmMain.ConfigureLogger;
 var
@@ -64,9 +75,40 @@ begin
   FLogger.Configure(LSettings);
 end;
 
+procedure TfrmMain.LoadSettingsToControls;
+begin
+  FSettings := FConfig.Load;
+  edtHost.Text := FSettings.Host;
+  edtPort.Text := IntToStr(FSettings.Port);
+  edtLogin.Text := FSettings.Username;
+  edtPassword.Text := FSettings.Password;
+  FLogger.Write(llInfo, 'Настройки подключения загружены из файла: ' + FConfig.FileName);
+end;
+
+procedure TfrmMain.SaveSettingsFromControls;
+var
+  LPort: Integer;
+begin
+  LPort := StrToIntDef(Trim(edtPort.Text), 23);
+  if (LPort < 1) or (LPort > 65535) then
+  begin
+    LPort := 23;
+  end;
+
+  FSettings.Host := Trim(edtHost.Text);
+  FSettings.Port := Word(LPort);
+  FSettings.Username := Trim(edtLogin.Text);
+  FSettings.Password := edtPassword.Text;
+  FConfig.Save(FSettings);
+  FLogger.Write(llInfo, 'Настройки подключения сохранены в файл: ' + FConfig.FileName);
+end;
+
 procedure TfrmMain.FormCreate(Sender: TObject);
 begin
   ConfigureLogger;
+  FConfig := TRoutesConfig.Create(GetIniFileName);
+  FConfig.EnsureExists;
+  LoadSettingsToControls;
   FClient := TKeeneticTelnetClient.Create;
   SetControlsState(False);
   FLogger.Write(llInfo, 'Тестовый проект Keenetic Telnet запущен.');
@@ -74,11 +116,33 @@ end;
 
 procedure TfrmMain.FormDestroy(Sender: TObject);
 begin
+  try
+    if FConfig <> nil then
+    begin
+      SaveSettingsFromControls;
+    end;
+  except
+    on E: Exception do
+    begin
+      if FLogger <> nil then
+      begin
+        FLogger.Write(llWarning, 'Не удалось сохранить настройки при выходе: ' + E.Message);
+      end;
+    end;
+  end;
+
   if FClient <> nil then
   begin
     FClient.Free;
     FClient := nil;
   end;
+
+  if FConfig <> nil then
+  begin
+    FConfig.Free;
+    FConfig := nil;
+  end;
+
   if FLogger <> nil then
   begin
     FLogger.Flush;
@@ -103,11 +167,13 @@ var
 begin
   LPort := StrToIntDef(Trim(edtPort.Text), 23);
   try
+    SaveSettingsFromControls;
     FLogger.Write(llInfo, 'Начало проверки Telnet-подключения.');
     FClient.Connect(Trim(edtHost.Text), Word(LPort), 15000);
     LLoginResult := FClient.Login(Trim(edtLogin.Text), edtPassword.Text);
     if LLoginResult.IsAuthorized then
     begin
+      SaveSettingsFromControls;
       FLogger.Write(llInfo, 'Авторизация выполнена успешно.');
     end
     else
@@ -138,6 +204,7 @@ begin
   begin
     FClient.Disconnect;
   end;
+  SaveSettingsFromControls;
   SetControlsState(False);
 end;
 
