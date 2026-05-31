@@ -1,7 +1,7 @@
 object frmMain: TfrmMain
   Left = 0
   Top = 0
-  Caption = 'Keenetic Telnet Test'
+  Caption = 'Проверка Telnet Keenetic'
   ClientHeight = 600
   ClientWidth = 900
   Color = clBtnFace
@@ -23,23 +23,23 @@ object frmMain: TfrmMain
   object lblPort: TLabel
     Left = 190
     Top = 10
-    Width = 22
+    Width = 29
     Height = 15
-    Caption = 'Port'
+    Caption = 'Порт'
   end
   object lblLogin: TLabel
     Left = 279
     Top = 10
-    Width = 30
+    Width = 36
     Height = 15
-    Caption = 'Login'
+    Caption = 'Логин'
   end
   object lblPassword: TLabel
     Left = 430
     Top = 10
-    Width = 19
+    Width = 43
     Height = 15
-    Caption = 'Key'
+    Caption = 'Пароль'
   end
   object edtHost: TEdit
     Left = 27
@@ -78,7 +78,7 @@ object frmMain: TfrmMain
     Top = 6
     Width = 125
     Height = 25
-    Caption = 'Connect Login'
+    Caption = 'Подключиться'
     TabOrder = 4
     OnClick = btnConnectClick
   end
@@ -87,7 +87,7 @@ object frmMain: TfrmMain
     Top = 6
     Width = 125
     Height = 25
-    Caption = 'Disconnect'
+    Caption = 'Отключиться'
     TabOrder = 5
     OnClick = btnDisconnectClick
   end
